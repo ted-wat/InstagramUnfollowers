@@ -1,13 +1,18 @@
 import React from "react";
-import { assertUnreachable, getCurrentPageUnfollowers, getMaxPage, getUsersForDisplay, isWithoutProfilePicture } from "../utils/utils";
+import { getCurrentPageUnfollowers, getMaxPage, createWhitelistMatcher, isWithoutProfilePicture } from '../utils/utils';
+import { ScanningTab } from '../model/scanning-tab';
 import { State } from "../model/state";
 import { UserNode } from "../model/user";
-import { WHITELISTED_RESULTS_STORAGE_KEY } from "../constants/constants";
 import { Language, t } from "../utils/i18n";
 
 
 export interface SearchingProps {
   state: State;
+  displayed: readonly UserNode[];
+  changeTab: (tab: ScanningTab) => void;
+  changeWhitelist: (entries: readonly UserNode[]) => void;
+  startQueue: () => void;
+  pairDescription: string;
   setState: (state: State) => void;
   scanningPaused: boolean;
   pauseScan: () => void;
@@ -19,7 +24,7 @@ export interface SearchingProps {
 }
 
 export const Searching = ({
-  state,
+  state, displayed: usersForDisplay, changeTab, changeWhitelist, startQueue, pairDescription,
   setState,
   scanningPaused,
   pauseScan,
@@ -33,13 +38,6 @@ export const Searching = ({
     return null;
   }
 
-  const usersForDisplay = getUsersForDisplay(
-    state.results,
-    state.whitelistedResults,
-    state.currentTab,
-    state.searchTerm,
-    state.filter,
-  );
   let currentLetter = "";
 
   const onNewLetter = (firstLetter: string) => {
@@ -52,35 +50,13 @@ export const Searching = ({
       return;
     }
 
-    let whitelistedResults: readonly UserNode[] = [];
-
-    switch (state.currentTab) {
-      case "non_whitelisted": {
-        const existingIds = new Set(state.whitelistedResults.map(user => user.id));
-        const usersToAdd = state.selectedResults.filter(user => !existingIds.has(user.id));
-        whitelistedResults = [...state.whitelistedResults, ...usersToAdd];
-        break;
-      }
-
-      case "whitelisted": {
-        const selectedIds = new Set(state.selectedResults.map(user => user.id));
-        whitelistedResults = state.whitelistedResults.filter(user => !selectedIds.has(user.id));
-        break;
-      }
-
-      default:
-        assertUnreachable(state.currentTab);
+    if (state.currentTab === 'whitelisted') {
+      changeWhitelist(state.whitelistedResults.filter(entry =>
+        !state.selectedResults.some(createWhitelistMatcher([entry]))));
+    } else {
+      const protectedUser = createWhitelistMatcher(state.whitelistedResults);
+      changeWhitelist([...state.whitelistedResults, ...state.selectedResults.filter(user => !protectedUser(user))]);
     }
-
-    localStorage.setItem(
-      WHITELISTED_RESULTS_STORAGE_KEY,
-      JSON.stringify(whitelistedResults),
-    );
-    setState({
-      ...state,
-      whitelistedResults,
-      selectedResults: [],
-    });
   };
 
   return (
@@ -172,7 +148,7 @@ export const Searching = ({
               className="button-secondary sidebar-whitelist-action"
               onClick={handleSelectedWhitelistAction}
             >
-              {state.currentTab === "non_whitelisted" ? t(lang, "addToWhitelist") : t(lang, "removeFromWhitelist")} ({state.selectedResults.length})
+              {state.currentTab !== 'whitelisted' ? t(lang, 'addToWhitelist') : t(lang, 'removeFromWhitelist')} ({state.selectedResults.length})
             </button>
           )}
           <div className="sidebar-stats metric-stack">
@@ -183,7 +159,7 @@ export const Searching = ({
             </p>
           </div>
 
-          {!state.isScanningActive && state.results.length > 0 && (
+          {!state.isScanningActive && state.currentTab !== 'past_unfollowers' && state.results.length > 0 && (
             <div className="sidebar-summary">
               <h4>{t(lang, "scanSummary")}</h4>
               <div className="summary-grid">
@@ -205,7 +181,7 @@ export const Searching = ({
           <div className="sidebar-footer-controls">
             <button
               className="button-control button-pause"
-              onClick={pauseScan}
+              disabled={!state.isScanningActive} onClick={pauseScan}
             >
               {scanningPaused ? t(lang, "resume") : t(lang, "pause")}
             </button>
@@ -244,89 +220,37 @@ export const Searching = ({
         </div>
         <button
           className="unfollow"
-          disabled={state.scanIncomplete || Boolean(state.isScanningActive) || state.selectedResults.length === 0}
+          disabled={state.currentTab === 'whitelisted' || (state.currentTab !== 'past_unfollowers' && state.scanIncomplete) || Boolean(state.isScanningActive) || state.selectedResults.length === 0}
           title={
             state.isScanningActive
               ? t(lang, "scanInProgressWait")
-              : state.scanIncomplete
+              : state.currentTab !== 'past_unfollowers' && state.scanIncomplete
               ? t(lang, "unfollowDisabledPartialScan")
               : undefined
           }
-          onClick={() => {
-            if (state.scanIncomplete) {
-              alert(t(lang, "unfollowDisabledPartialScan"));
-              return;
-            }
-            if (!confirm(t(lang, "unfollowConfirm"))) {
-              return;
-            }
-            //TODO TEMP until types are properly fixed
-            // @ts-ignore
-            setState(prevState => {
-              if (prevState.status !== "scanning") {
-                return prevState;
-              }
-              if (prevState.selectedResults.length === 0) {
-                alert(t(lang, "selectAtLeastOneUser"));
-                return prevState;
-              }
-              const newState: State = {
-                ...prevState,
-                status: "unfollowing",
-                percentage: 0,
-                unfollowLog: [],
-                filter: {
-                  showSucceeded: true,
-                  showFailed: true,
-                },
-              };
-              return newState;
-            });
-          }}
+          onClick={startQueue}
         >
           {t(lang, "unfollowCount", state.selectedResults.length)}
         </button>
       </aside>
       <article className="results-container">
-        {state.scanIncomplete && (
+        {state.currentTab !== 'past_unfollowers' && state.scanIncomplete && (
           <div className="scan-warning-banner scan-incomplete-banner" role="alert">
             <span>{t(lang, "partialScanWarning")}</span>
           </div>
         )}
         <nav className="tabs-container">
-          <button
-            type="button"
-            className={`tab ${state.currentTab === "non_whitelisted" ? "tab-active" : ""}`}
-            onClick={() => {
-              if (state.currentTab === "non_whitelisted") {
-                return;
-              }
-              setState({
-                ...state,
-                currentTab: "non_whitelisted",
-                page: 1,
-              });
-            }}
-          >
-            {t(lang, "nonWhitelistedTab")}
-          </button>
-          <button
-            type="button"
-            className={`tab ${state.currentTab === "whitelisted" ? "tab-active" : ""}`}
-            onClick={() => {
-              if (state.currentTab === "whitelisted") {
-                return;
-              }
-              setState({
-                ...state,
-                currentTab: "whitelisted",
-                page: 1,
-              });
-            }}
-          >
-            {t(lang, "whitelistedTab")}
-          </button>
+          {(['non_whitelisted', 'past_unfollowers', 'whitelisted'] as const).map(tab => (
+            <button key={tab} type='button' aria-pressed={state.currentTab === tab}
+              className={`tab ${state.currentTab === tab ? 'tab-active' : ''}`}
+              disabled={tab === 'past_unfollowers' && state.isScanningActive}
+              onClick={() => changeTab(tab)}>
+              {t(lang, tab === 'past_unfollowers' ? 'pastUnfollowers' : tab === 'whitelisted' ? 'whitelistedTab' : 'nonFollowers')}
+            </button>
+          ))}
         </nav>
+        {state.currentTab === 'past_unfollowers' && <p className='diff-description'>{pairDescription}</p>}
+        {state.currentTab === 'past_unfollowers' && !usersForDisplay.length && <p className='diff-description'>{t(lang, 'noUsersFound')}</p>}
         {getCurrentPageUnfollowers(usersForDisplay, state.page).map(user => {
           const firstLetter = user.username.substring(0, 1).toUpperCase();
           return (
@@ -334,52 +258,21 @@ export const Searching = ({
               {firstLetter !== currentLetter && onNewLetter(firstLetter)}
               <label className="result-item">
                 <div className="flex grow align-center">
-                  <div
-                    className="avatar-container"
-                    onClick={(e: React.MouseEvent<HTMLDivElement>) => {
-                      // Prevent selecting result when trying to add to whitelist.
-                      e.preventDefault();
-                      e.stopPropagation();
-                      let whitelistedResults: readonly UserNode[] = [];
-                      switch (state.currentTab) {
-                        case "non_whitelisted":
-                          whitelistedResults = [...state.whitelistedResults, user];
-                          break;
-
-                        case "whitelisted":
-                          whitelistedResults = state.whitelistedResults.filter(
-                            result => result.id !== user.id,
-                          );
-                          break;
-
-                        default:
-                          assertUnreachable(state.currentTab);
-                      }
-                      localStorage.setItem(
-                        WHITELISTED_RESULTS_STORAGE_KEY,
-                        JSON.stringify(whitelistedResults),
-                      );
-                      setState({ ...state, whitelistedResults });
-                    }}
-                  >
-                    <img
-                      className="avatar"
-                      alt={user.username}
-                      src={user.profile_pic_url}
-                    />
-                    <span className="avatar-icon-overlay-container">
-                      {state.currentTab === "non_whitelisted" ? (
-                        <UserCheckIcon />
-                      ) : (
-                        <UserUncheckIcon />
-                      )}
-                    </span>
-                  </div>
+                  <button type='button' className='avatar-container' aria-label={`${t(lang, state.currentTab === 'whitelisted' ? 'removeFromWhitelist' : 'addToWhitelist')} @${user.username}`}
+                    onClick={event => {
+                      event.preventDefault();
+                      changeWhitelist(state.currentTab === 'whitelisted'
+                        ? state.whitelistedResults.filter(entry => !createWhitelistMatcher([entry])(user))
+                        : [...state.whitelistedResults, user]);
+                    }}>
+                    <span className='avatar initials' aria-hidden='true'>{user.username.slice(0, 2).toUpperCase()}</span>
+                    <span className='avatar-icon-overlay-container'>{state.currentTab === 'whitelisted' ? <UserUncheckIcon /> : <UserCheckIcon />}</span>
+                  </button>
                   <div className="flex column m-medium">
                     <a
                       className="fs-xlarge"
                       target="_blank"
-                      href={`/${user.username}`}
+                      href={/^[a-z0-9._]{1,30}$/i.test(user.username) ? `/${encodeURIComponent(user.username)}/` : undefined}
                       rel="noreferrer"
                     >
                       {user.username}

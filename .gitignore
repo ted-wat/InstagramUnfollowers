@@ -1,6 +1,7 @@
 node_modules/
 .vscode/
-dist/
+/dist/*
+!/dist/iu-diff-console.js
 .idea/
 .DS_Store
 bun.lockb

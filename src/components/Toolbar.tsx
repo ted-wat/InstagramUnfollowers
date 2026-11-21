@@ -1,6 +1,6 @@
 import React, { ChangeEvent, useState } from "react";
 import { State } from "../model/state";
-import { assertUnreachable, copyListToClipboard, exportToCSV, exportToJSON, getCurrentPageUnfollowers, getUsersForDisplay } from "../utils/utils";
+import { assertUnreachable, copyListToClipboard, exportToCSV, exportToJSON, getCurrentPageUnfollowers } from '../utils/utils';
 import { SettingMenu } from "./SettingMenu";
 import { SettingIcon } from "./icons/SettingIcon";
 import { Timings } from "../model/timings";
@@ -9,6 +9,9 @@ import { UserNode } from "../model/user";
 import { Language, t } from "../utils/i18n";
 
 interface ToolBarProps {
+  displayed: readonly UserNode[];
+  openSnapshots: () => void;
+  checkViewOwner: () => boolean;
   isActiveProcess: boolean;
   state: State;
   setState: (state: State) => void;
@@ -17,13 +20,13 @@ interface ToolBarProps {
   currentTimings: Timings;
   setTimings: (timings: Timings) => void;
   whitelistedUsers: readonly UserNode[];
-  onWhitelistUpdate: (users: readonly UserNode[]) => void;
+  onWhitelistUpdate: (users: readonly UserNode[]) => boolean;
   lang: Language;
   onLanguageChange: (lang: Language) => void;
 }
 
 export const Toolbar = ({
-  isActiveProcess,
+  displayed, openSnapshots, checkViewOwner, isActiveProcess,
   state,
   setState,
   toggleAllUsers,
@@ -38,9 +41,13 @@ export const Toolbar = ({
 
   const [settingMenu, setSettingMenu] = useState(false);
 
+  const selectedIds = new Set(state.status === 'scanning' ? state.selectedResults.map(user => user.id) : []);
+  const pageUsers = state.status === 'scanning' ? getCurrentPageUnfollowers(displayed, state.page) : [];
+  const allSelected = (users: readonly UserNode[]) => users.length > 0 && users.every(user => selectedIds.has(user.id));
+
   return (
     <header className="app-header">
-      {state.status === "scanning" && state.results.length === 0 && (
+      {state.status === 'scanning' && state.isScanningActive && state.results.length === 0 && (
         <div className="scan-warning-banner" role="status">
           <span>{t(lang, "scanNoticeBanner")}</span>
         </div>
@@ -81,19 +88,17 @@ export const Toolbar = ({
           </div>
         </div>
         <div className="toolbar-actions">
+          <button type='button' className='copy-list' disabled={isActiveProcess} onClick={openSnapshots}>{t(lang, 'snapshots')}</button>
           <button
             className="copy-list"
             onClick={() => {
+              if (!checkViewOwner()) {
+                return;
+              }
               switch (state.status) {
                 case "scanning":
                   return copyListToClipboard(
-                    getUsersForDisplay(
-                      state.results,
-                      state.whitelistedResults,
-                      state.currentTab,
-                      state.searchTerm,
-                      state.filter,
-                    ),
+                    displayed,
                     t(lang, "copiedToClipboard")
                   );
                 case "initial":
@@ -111,8 +116,8 @@ export const Toolbar = ({
             className="copy-list"
             title={t(lang, "exportJson")}
             onClick={() => {
-              if (state.status === "scanning") {
-                exportToJSON(getUsersForDisplay(state.results, state.whitelistedResults, state.currentTab, state.searchTerm, state.filter));
+              if (state.status === 'scanning' && checkViewOwner()) {
+                exportToJSON(displayed);
               }
             }}
             disabled={state.status !== "scanning"}
@@ -123,8 +128,8 @@ export const Toolbar = ({
             className="copy-list"
             title={t(lang, "exportCsv")}
             onClick={() => {
-              if (state.status === "scanning") {
-                exportToCSV(getUsersForDisplay(state.results, state.whitelistedResults, state.currentTab, state.searchTerm, state.filter));
+              if (state.status === 'scanning' && checkViewOwner()) {
+                exportToCSV(displayed);
               }
             }}
             disabled={state.status !== "scanning"}
@@ -162,7 +167,7 @@ export const Toolbar = ({
                   return;
                 case "scanning":
                   return setState({
-                    ...state,
+                    ...state, page: 1, selectedResults: [],
                     searchTerm: e.currentTarget.value,
                   });
                 case "unfollowing":
@@ -182,13 +187,7 @@ export const Toolbar = ({
                 type="checkbox"
                 // Avoid allowing selection only while the scan is actively fetching
                 disabled={Boolean(state.isScanningActive)}
-                checked={
-                  (() => {
-                    const displayed = getUsersForDisplay(state.results, state.whitelistedResults, state.currentTab, state.searchTerm, state.filter);
-                    const pageUsers = getCurrentPageUnfollowers(displayed, state.page);
-                    return pageUsers.length > 0 && pageUsers.every(u => state.selectedResults.some(s => s.id === u.id));
-                  })()
-                }
+                checked={allSelected(pageUsers)}
                 className="toggle-all-checkbox"
                 onChange={toggleCurrentePageUsers}
               />
@@ -202,18 +201,7 @@ export const Toolbar = ({
                 type="checkbox"
                 // Avoid allowing selection only while the scan is actively fetching
                 disabled={Boolean(state.isScanningActive)}
-                checked={
-                  (() => {
-                    const displayed = getUsersForDisplay(
-                      state.results,
-                      state.whitelistedResults,
-                      state.currentTab,
-                      state.searchTerm,
-                      state.filter,
-                    );
-                    return displayed.length > 0 && displayed.every(u => state.selectedResults.some(s => s.id === u.id));
-                  })()
-                }
+                checked={allSelected(displayed)}
                 className="toggle-all-checkbox"
                 onChange={toggleAllUsers}
               />

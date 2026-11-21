@@ -10,7 +10,7 @@ interface SettingMenuProps {
   currentTimings: Timings;
   setTimings: (timings: Timings) => void;
   whitelistedUsers: readonly UserNode[];
-  onWhitelistUpdate: (users: readonly UserNode[]) => void;
+  onWhitelistUpdate: (users: readonly UserNode[]) => boolean;
   lang: Language;
   onLanguageChange: (lang: Language) => void;
 }

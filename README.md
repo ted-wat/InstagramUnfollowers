@@ -10,16 +10,24 @@
 <a name="-english"></a>
 ## 🇬🇧 English
 
-A nifty tool that lets you see who doesn't follow you back on Instagram.  
-<u>Browser-based and requires no downloads or installations!</u>
+**Non-Followers** shows accounts you follow that are absent from your current follower list. **Past Unfollowers (Diff)** compares two saved observations using numeric Instagram account IDs. A creator who never followed you back can appear in Non-Followers and is excluded from the historical diff.
 
-> ⚡ **Live Streaming & Fast Cache:** Accounts now appear dynamically on screen in real time as batches are fetched from Instagram. In addition, completed scans are cached locally so you can reload your audit instantly (0ms) without making unnecessary API calls!
+### Save a baseline and compare it later
+
+1. Build this checkout with Node 22+, `npm ci` and `npm run build`. Inspect **`dist/iu-diff-console.js`**, then load the script on your own signed-in `https://www.instagram.com/` page as described below.
+2. Click **Run Scan**. Let the scanner finish both followers and following. Open **Snapshots**, enter a label such as **T0** and click **Save Current Scan as Snapshot**. The capture time defaults to when the scan finished. You can edit the local date and time.
+3. Click **Export snapshots (.json)** and keep the backup somewhere private. Snapshots are scoped to the signed-in account and this browser's Instagram site storage. Clearing site data removes the local history. A backup contains both lists, including handles, names and profile-picture URLs. The whitelist has its own backup in Settings.
+4. On a later date, reload Instagram, load the overlay again, run a fresh scan and save **T1**. In **Snapshots**, choose the earlier **Baseline (T0)** and later **Comparison (T1)**. Click **View diff**. To use existing history after a reload, open **Snapshots** directly from the launch screen.
+5. The result includes an ID only if it followed you at T0, is absent from T1 followers, is still in T1 following and is outside your whitelist. Search, protect and select accounts using the existing controls. Comparison metadata supplies the displayed handle after a rename. The two observations show a relationship change. They cannot establish intent, the exact time of the change or events between scans.
+
+**Restore or import.** Use **Import snapshot backup (.json)** to restore this tool's history while signed in to the same account. For an Accounts Center export, choose **Import Meta Accounts Center files**, enter the export capture time, and select `following.json` and **all** `followers_N.json` files together from the same account and all-time export. A single relationship timestamp is not an export timestamp. Many exports identify accounts only by handle or profile link. The importer shows those handles locally for review. Every entry must have a verifiable numeric ID for an export to become a diff snapshot. Omitted final parts cannot be detected from filenames alone.
+
+**Interrupted scans.** An interrupted or legacy cached scan can be reviewed. Saving a baseline requires a complete fresh scan. HTTP 429 or `feedback_required` stops the operation. The cooldown is ten minutes. Local backup and diff review can continue during that time. [Network and storage audit](./SECURITY_AUDIT.md)
 
 ### 🖥️ Desktop Usage
 
-1. Copy the code from: [InstagramUnfollowers Tool](https://davidarroyo1234.github.io/InstagramUnfollowers/)
-2. Press the COPY button to copy the code:
-   <br/><img src="./assets/copy_code.png" alt="Copy code button" />
+1. Use the readable console script from your local build.
+2. Copy its complete contents. The generated `dist/index.html` also contains a **Copy** button for the same script.
 3. Go to the Instagram website and log in to your account.
 4. Open the developer console:
    - Windows / Linux: `Ctrl + Shift + J`
@@ -29,7 +37,7 @@ A nifty tool that lets you see who doesn't follow you back on Instagram.
 6. Click **"Run Scan"** to start scanning (or **"⚡ Load previous scan"** to open your saved results instantly).
 7. As scanning runs, accounts appear live on screen, and follow-back status updates automatically:
    <br/><img src="./assets/results.png" alt="Results screen" />
-8. 🤍 **Whitelist users** by clicking their profile image.
+8. 🤍 **Whitelist users** by clicking the initials beside their name.
 9. 🌐 **Switch language** anytime between English and Spanish using the `🌐 EN / ES` button in the top bar.
 10. 💾 **Manage your whitelist** via Settings:
     - Export: Save your whitelist as a JSON backup file
@@ -54,38 +62,42 @@ For Android users who want to use it on mobile:
 - ⚡ **Live Progressive Streaming**: Accounts stream dynamically onto your screen as each batch arrives, eliminating blank waiting screens on large accounts.
 - ⚡ **Instant Local Cache (0ms load)**: Re-open and review previously completed audits instantly without re-scraping from scratch.
 - 🌐 **Bilingual (EN / ES)**: Native English and Spanish support with instant switching.
-- 🛡️ **Anti-Ban & Session Protection**: Uses full Instagram Web headers (`X-ASBD-ID`, `X-CSRFToken`, `XMLHttpRequest`) to prevent forced logouts and suspicious activity flags.
 - 🛡️ **Action-Block Guard**: Double-checks unfollow API responses to prevent ghost unfollows; halts the queue automatically if Instagram returns `feedback_required` to protect your account.
-- ⏳ **Smart Rate-Limit & Soft-Block Backoff**: Automatically pauses and retries if Instagram returns HTTP 429 or HTTP 400 (`feedback_required`) with exponential cooldowns instead of failing.
+- ⏳ **Request pacing**: Jittered delays, periodic pauses and a persistent cooldown apply to live operations.
 - ⚠️ **Wrong-Detect Guard**: Expanded page limits supporting accounts with tens of thousands of followers, with safe lock preventing accidental unfollows if a scan is interrupted.
 - 🤍 **Persistent & Bulk Whitelist**: Protect specific accounts with local persistence, JSON export/import, and direct username list pasting.
 - ⚙️ **Customizable Timings**: Control request pacing to match your account safety preferences.
 - 🎨 **Apple-inspired UI**: Clean, responsive, and minimalist interface.
-- 🔒 **100% Client-Side Privacy**: All data is processed locally in your browser. No credentials or data are sent to external servers.
+- 🔒 **Local history**: The overlay accesses Instagram for the signed-in account. Snapshot comparison, backup and import work locally.
 
 ### 🛠️ Development
 
-- Node version: Node 16+ / Node 18+ / Node 20+
-- Install dependencies: `npm install`
+- Node 22 or later (see `.nvmrc`)
+- Install dependencies with `npm ci`
+- Run the tests with `npm test`
 - Build: `npm run build`
 - Dev server with live reload: `npm run build-dev`
-- Do not edit `public/index.html` manually: it is regenerated automatically by GitHub Actions, and PRs that modify it are rejected.
+- The build generates the copy page, console script and standalone preview in `dist/`. The upstream `public/index.html` is a protected build template. The configured Pages workflow publishes the generated directory.
 
 ---
 
 <a name="-español"></a>
 ## 🇪🇸 Español
 
-Una herramienta práctica y ligera que te permite ver quién no te sigue de vuelta en Instagram.  
-<u>¡Funciona directamente en tu navegador y no requiere descargas ni instalaciones externas!</u>
+**No te siguen** muestra cuentas que sigues y que no figuran entre tus seguidores actuales. **Seguidores perdidos (diferencia)** compara dos capturas por ID numérico.
 
-> ⚡ **Transmisión en vivo y caché rápido:** Ahora las cuentas aparecen dinámicamente en pantalla en tiempo real a medida que se descargan los lotes de Instagram. Además, los escaneos completados se guardan localmente para recargar tu lista al instante (0ms) sin hacer peticiones innecesarias.
+### Guardar T0 y comparar con T1
+
+1. Con Node 22 o posterior, ejecuta `npm ci` y `npm run build`. Revisa `dist/iu-diff-console.js` y carga el script en tu propia sesión de Instagram.
+2. Pulsa **Iniciar Escaneo** y espera a que termine la lectura de seguidores y seguidos. Abre **Capturas**, escribe una etiqueta como **T0**, revisa la hora local y pulsa **Guardar escaneo actual como captura**.
+3. Guarda una copia con **Exportar capturas (.json)**. Borrar los datos del sitio elimina el historial del navegador. Las copias contienen datos personales de ambas listas. La lista blanca tiene su propia copia en Ajustes.
+4. Más adelante, realiza un nuevo escaneo y guárdalo como **T1**. Elige T0 como captura inicial y T1 como comparación. Pulsa **Ver diferencia**. Solo aparecen cuentas que te seguían en T0, ya no figuran entre los seguidores en T1, seguías en T1 y están fuera de la lista blanca. Un cambio de nombre conserva la identidad. Las capturas no revelan el motivo ni el momento exacto del cambio.
+5. Puedes restaurar tu copia en **Importar copia de capturas (.json)** para la misma cuenta. En **Importar archivos del Centro de cuentas de Meta**, indica la fecha de la exportación y selecciona `following.json` y todas las partes `followers_N.json` de una única exportación de todo el historial. Los archivos con registros sin ID numérico permiten consultar los nombres localmente. Solo las listas completas con IDs verificables se guardan como capturas para la comparación.
 
 ### 🖥️ Uso en Computadora (Escritorio)
 
-1. Copia el código desde la página oficial: [Herramienta InstagramUnfollowers](https://davidarroyo1234.github.io/InstagramUnfollowers/)
-2. Presiona el botón **COPY** para copiar el script.
-   <br/><img src="./assets/copy_code.png" alt="Botón copiar código" />
+1. Abre el archivo compilado `dist/iu-diff-console.js` y revisa su contenido.
+2. Copia el código completo. La página generada `dist/index.html` también ofrece un botón para copiarlo.
 3. Entra a Instagram en tu navegador e inicia sesión en tu cuenta.
 4. Abre la consola de desarrollador:
    - Windows / Linux: `Ctrl + Shift + J`
@@ -120,22 +132,22 @@ Para usuarios de Android que quieran utilizarlo desde el móvil:
 - ⚡ **Carga progresiva en vivo**: Las cuentas aparecen en pantalla en tiempo real mientras se descargan, evitando pantallas en blanco en cuentas con muchos seguidos.
 - ⚡ **Caché local instantáneo (0ms)**: Carga escaneos anteriores con un solo clic desde la pantalla inicial sin hacer peticiones innecesarias.
 - 🌐 **Soporte Bilingüe (Español / Inglés)**: Interfaz completamente en español e inglés con cambio instantáneo.
-- 🛡️ **Protección antibloqueo y anti-cierre de sesión**: Envía cabeceras completas de Instagram Web (`X-ASBD-ID`, `X-CSRFToken`, `XMLHttpRequest`) para evitar alertas de actividad sospechosa y cierres de sesión forzados.
 - 🛡️ **Protección contra bloqueos de acción (Action Block)**: Verifica la respuesta real de la API de Instagram al dejar de seguir evitando falsos éxitos ("ghost unfollows"); detiene la cola automáticamente ante `feedback_required` para proteger tu cuenta de suspensiones.
-- ⏳ **Manejo inteligente de Rate Limit y bloqueos suaves**: Pausa y reintenta automáticamente con pausas exponenciales ante respuestas HTTP 429 o HTTP 400 (`feedback_required`) evitando que el escaneo falle.
+- ⏳ **Límites**: HTTP 429 o `feedback_required` detienen la operación y activan una espera de diez minutos.
 - ⚠️ **Protección contra falsos no-seguidores**: Límites de páginas ampliados para cuentas con decenas de miles de seguidores, y bloqueo de seguridad del unfollow si el escaneo se interrumpió.
 - 🤍 **Lista blanca persistente y masiva**: Protege a tus amigos y familiares con guardado local, exportación/importación en JSON y opción de pegar nombres de usuario directamente.
 - ⚙️ **Tiempos configurables**: Ajusta los intervalos entre peticiones para mayor seguridad.
 - 🎨 **Diseño limpio y moderno**: Interfaz minimalista y responsiva inspirada en el diseño de Apple.
-- 🔒 **Privacidad total**: Todo se ejecuta localmente en tu navegador. Tus datos y contraseñas nunca salen de tu sesión ni van a servidores externos.
+- 🔒 **Historial local**: El escaneo consulta Instagram. Las capturas, las comparaciones y las copias se procesan en tu navegador.
 
 ### 🛠️ Desarrollo
 
-- Versión de Node: Node 16+ / Node 18+ / Node 20+
-- Instalar dependencias: `npm install`
+- Node 22 o posterior
+- Instalar dependencias con `npm ci`
+- Ejecutar las pruebas con `npm test`
 - Compilar: `npm run build`
 - Servidor de desarrollo con recarga automática: `npm run build-dev`
-- No edites `public/index.html` a mano: se regenera automáticamente con GitHub Actions, y los PRs que lo modifican son rechazados.
+- El script, la página de copia y la vista previa se generan en `dist/`. El flujo de Pages usa estos archivos.
 
 ---
 

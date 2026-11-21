@@ -1,11 +1,16 @@
 const path = require('path');
 
+const preact = path.dirname(require.resolve('preact/package.json'));
+const compat = path.join(preact, 'compat/src/index.js');
+
 module.exports = {
+    devtool: false,
+    optimization: { minimize: false, moduleIds: 'named', mangleExports: false },
     entry: './src/main.tsx',
     module: {
         rules: [
             {
-                test: /\.ts|\.tsx$/,
+                test: /\.tsx?$/,
                 use: 'ts-loader',
                 exclude: /node_modules/,
             },
@@ -17,7 +22,7 @@ module.exports = {
                     // Translates CSS into CommonJS
                     'css-loader',
                     // Compiles Sass to CSS
-                    'sass-loader',
+                    { loader: 'sass-loader', options: { api: 'modern', sassOptions: { style: 'expanded' } } },
                 ],
             },
         ],
@@ -25,15 +30,18 @@ module.exports = {
     resolve: {
         extensions: ['.tsx', '.ts', '.js', '.jsx'],
         alias: {
-            react: 'preact/compat',
-            'react-dom': 'preact/compat',
+            'react$': compat,
+            'react-dom$': compat,
+            'preact$': path.join(preact, 'src/index.js'),
+            'preact/hooks$': path.join(preact, 'hooks/src/index.js'),
         },
     },
     output: {
-        filename: 'dist.js',
+        filename: 'iu-diff-console.js',
         path: path.resolve(__dirname, 'dist'),
     },
     devServer: {
+        static: { directory: path.resolve(__dirname, 'dist') },
         client: {
             overlay: {
                 errors: true,
