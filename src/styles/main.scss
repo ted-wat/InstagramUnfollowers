@@ -2008,3 +2008,27 @@ html .iu button.load-cached-scan:hover {
         height: 3.5rem;
     }
 }
+
+html .iu .snapshot-manager {
+  width: min(36rem, 94vw); max-height: 86vh; overflow: auto; box-sizing: border-box;
+  background: #201e1b; color: #f7f1e8; border: 1px solid #676056; border-radius: .6rem; padding: 1.25rem;
+  &::backdrop { background: rgba(0, 0, 0, .72); }
+  header { display: flex; justify-content: space-between; align-items: center; }
+  h2, h3 { margin: 0; }
+  h3 { font-size: 1rem; }
+  section, > details { margin-top: 1rem; border-top: 1px solid #524d45; padding-top: .9rem; }
+  label { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: .3rem; margin: .65rem 0; font-size: .9rem; }
+  .meta-consent { display: flex; align-items: center; gap: .6rem; }
+  input:not([type=checkbox]), select, button { max-width: 100%; padding: .45rem; color-scheme: dark; }
+  input:not([type=checkbox]), select { box-sizing: border-box; width: 100%; min-width: 0; }
+  button { background: #3b3834; padding: .5rem .75rem; }
+  button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid #62d6d0; }
+  p, summary { font-size: .9rem; }
+  summary { cursor: pointer; }
+  .snapshot-notice { position: sticky; bottom: 0; background: #353028; padding: .65rem; }
+  .unresolved-handles pre { max-height: 10rem; overflow: auto; }
+}
+html .iu .results-container .result-item .avatar.initials {
+  display: grid; height: 3.5rem; width: 3.5rem; place-items: center; background: #313831; color: #d8e6cd; font-weight: 700;
+}
+html .iu .diff-description { margin: 1rem 1.25rem; }

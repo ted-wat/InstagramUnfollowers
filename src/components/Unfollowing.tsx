@@ -52,10 +52,10 @@ export const Unfollowing = (
       <article className="unfollow-log-container">
         {state.aborted && (
           <div className="fs-large p-medium clr-red" role="alert">
-            {t(lang, "actionBlockedWarning")}
+            {state.stopReason || t(lang, 'actionBlockedWarning')}
           </div>
         )}
-        {state.unfollowLog.length === state.selectedResults.length && (
+        {!state.aborted && state.unfollowLog.length === state.selectedResults.length && (
           <>
             <hr />
             <div className="fs-large p-medium clr-green">{t(lang, "allDone")}</div>
@@ -70,7 +70,7 @@ export const Unfollowing = (
                 <a
                   className="clr-inherit"
                   target="_blank"
-                  href={`/${entry.user.username}`}
+                  href={/^[a-z0-9._]{1,30}$/i.test(entry.user.username) ? `/${encodeURIComponent(entry.user.username)}/` : undefined}
                   rel="noreferrer"
                 >
                   &nbsp;{entry.user.username}

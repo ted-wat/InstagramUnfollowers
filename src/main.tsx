@@ -2,7 +2,7 @@ import React, { ChangeEvent, useEffect, useState } from "react";
 import { render } from "react-dom";
 import "./styles.scss";
 
-import { Typename, UserNode } from "./model/user";
+import { UserNode } from './model/user';
 import { Toast } from "./components/Toast";
 import { UserCheckIcon } from "./components/icons/UserCheckIcon";
 import { UserUncheckIcon } from "./components/icons/UserUncheckIcon";
@@ -13,6 +13,7 @@ import {
   DEFAULT_TIME_TO_WAIT_AFTER_FIVE_UNFOLLOWS,
   DEFAULT_USERS_PER_SEARCH_CYCLE,
   BLOCKED_COOLDOWN_MS,
+  WHITELISTED_RESULTS_STORAGE_KEY,
   FOLLOWERS_PAGE_SAFETY_LIMIT,
   FOLLOWING_PAGE_SAFETY_LIMIT,
   CHECKS_BEFORE_LONG_SLEEP,
@@ -20,9 +21,9 @@ import {
   RATE_LIMIT_COOLDOWN_SECONDS,
 } from "./constants/constants";
 import {
-  addFollowerToIndex,
+  createWhitelistMatcher,
+  isHardBlock,
   assertUnreachable,
-  createFollowerIndex,
   deduplicateUsersById,
   fetchFriendshipsPage,
   FriendshipsListKind,
@@ -31,26 +32,36 @@ import {
   getCurrentPageUnfollowers,
   getUsersForDisplay,
   InstagramApiError,
-  isUserInFollowerIndex,
   RawFriendshipUser,
-  rawFriendshipUserToUserNode,
   sleep,
   unfollowUser,
 } from "./utils/utils";
+import { SnapshotManager, ScanCapture, SnapshotPair } from './components/SnapshotManager';
+import { SnapshotUser, pastUnfollowers, snapshotUser } from './utils/snapshots';
+import { ScanningTab } from './model/scanning-tab';
 import { NotSearching } from "./components/NotSearching";
 import { State } from "./model/state";
 import { Searching } from "./components/Searching";
 import { Toolbar } from "./components/Toolbar";
 import { Unfollowing } from "./components/Unfollowing";
 import { Timings } from "./model/timings";
-import { getBlockedUntil, loadCachedScanResults, loadTimings, loadWhitelist, saveCachedScanResults, saveTimings, saveWhitelist, setBlockedUntil } from "./utils/whitelist-manager";
+import { getBlockedUntil, loadCachedScanResults, loadWhitelistForAction, loadTimings, loadWhitelist, saveCachedScanResults, saveTimings, saveWhitelist, setBlockedUntil } from './utils/whitelist-manager';
 import { getInitialLanguage, Language, saveLanguage, t } from "./utils/i18n";
 
 const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const isLocalPreview = LOCAL_PREVIEW_HOSTS.has(location.hostname);
 
-const _avatarUrl = (seed: string): string =>
-  `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(seed)}&backgroundColor=0f172a,1f2937,312e81&fontFamily=Verdana`;
+const currentViewer = (): string | null => {
+  if (isLocalPreview) {
+    return '1';
+  }
+  const id = getCookie('ds_user_id');
+  return id && /^[1-9][0-9]*$/.test(id) ? id : null;
+};
+
+const toResult = (user: SnapshotUser, followsViewer = false): UserNode => ({
+  ...user, follows_viewer: followsViewer, followed_by_viewer: true, requested_by_viewer: false,
+});
 
 const _createPreviewUser = (
   id: string,
@@ -61,25 +72,13 @@ const _createPreviewUser = (
   id,
   username,
   full_name: fullName,
-  profile_pic_url: _avatarUrl(username),
+  profile_pic_url: '',
   is_private: options.isPrivate ?? false,
   is_verified: options.isVerified ?? false,
   followed_by_viewer: true,
   follows_viewer: options.followsViewer ?? false,
   requested_by_viewer: false,
-  reel: {
-    id,
-    expiring_at: 0,
-    has_pride_media: false,
-    latest_reel_media: 0,
-    seen: null,
-    owner: {
-      __typename: Typename.GraphUser,
-      id,
-      profile_pic_url: _avatarUrl(username),
-      username,
-    },
-  },
+
 });
 
 const _getPreviewUsers = (): readonly UserNode[] => [
@@ -109,7 +108,7 @@ function App() {
           searchTerm: "",
           currentTab: "non_whitelisted",
           percentage: 100,
-          results: _getPreviewUsers(),
+          results: _getPreviewUsers(), viewerId: '1',
           selectedResults: _getPreviewUsers().slice(0, 3),
           whitelistedResults: _getPreviewUsers().slice(10, 12),
           filter: {
@@ -121,6 +120,10 @@ function App() {
         : { status: "initial" as const }
     ),
   });
+
+  const [capture, setCapture] = useState<ScanCapture | null>(null);
+  const [pair, setPair] = useState<SnapshotPair | null>(null);
+  const [historyOwner, setHistoryOwner] = useState<string | null>(null);
 
   const [toast, setToast] = useState<{ readonly show: false } | { readonly show: true; readonly text: string }>({
     show: false,
@@ -142,7 +145,7 @@ function App() {
     saveTimings(timings);
   }, [timings]);
 
-  const [cachedScan, setCachedScan] = useState<{ readonly results: readonly UserNode[]; readonly timestamp: number } | null>(() =>
+  const [cachedScan, setCachedScan] = useState<ReturnType<typeof loadCachedScanResults>>(() =>
     loadCachedScanResults(),
   );
 
@@ -174,13 +177,128 @@ function App() {
       isActiveProcess = Boolean(state.isScanningActive);
       break;
     case "unfollowing":
-      isActiveProcess = !state.aborted && state.percentage < 100;
+      isActiveProcess = !state.aborted && state.unfollowLog.length < state.selectedResults.length;
       break;
     default:
       assertUnreachable(state);
   }
 
+  const activeOwner = state.status === 'initial' ? null : state.viewerId;
+  const checkViewOwner = React.useCallback(() => {
+    const viewer = currentViewer();
+    if ((!activeOwner || activeOwner === viewer) && (!historyOwner || historyOwner === viewer)) {
+      return true;
+    }
+    setHistoryOwner(null);
+    setPair(null);
+    setCapture(null);
+    setCachedScan(loadCachedScanResults());
+    setState({ status: 'initial' });
+    setToast({ show: true, text: t(lang, 'scanAccountChanged') });
+    return false;
+  }, [activeOwner, historyOwner, lang]);
+
+  useEffect(() => {
+    const check = () => {
+      if (!document.hidden) {
+        checkViewOwner();
+      }
+    };
+    window.addEventListener('focus', check);
+    document.addEventListener('visibilitychange', check);
+    return () => {
+      window.removeEventListener('focus', check);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, [checkViewOwner]);
+
+  function openSnapshots() {
+    if (!checkViewOwner()) {
+      return;
+    }
+    const viewer = currentViewer();
+    if (viewer) {
+      setHistoryOwner(viewer);
+    } else {
+      setToast({ show: true, text: t(lang, 'loginForSnapshots') });
+    }
+  }
+
+  const viewingDiff = state.status === 'scanning' && state.currentTab === 'past_unfollowers';
+  const scanViewer = state.status === 'scanning' ? state.viewerId : undefined;
+  const scanWhitelist = state.status === 'scanning' ? state.whitelistedResults : undefined;
+  const diffUsers = React.useMemo(() => {
+    if (!viewingDiff || !scanWhitelist || !pair || pair.baseline.ownerId !== scanViewer) {
+      return [];
+    }
+    return pastUnfollowers(pair.baseline, pair.comparison, scanWhitelist).map(user => toResult(user));
+  }, [viewingDiff, scanViewer, scanWhitelist, pair]);
+  const displayed = state.status === 'scanning'
+    ? getUsersForDisplay(state.currentTab === 'past_unfollowers' ? diffUsers : state.results,
+      state.whitelistedResults, state.currentTab, state.searchTerm, state.filter)
+    : [];
+
+  function viewDiff(chosen: SnapshotPair) {
+    const viewerId = currentViewer();
+    if (!viewerId || chosen.baseline.ownerId !== viewerId || chosen.comparison.ownerId !== viewerId) {
+      return;
+    }
+    setPair(chosen);
+    setHistoryOwner(null);
+    if (state.status === 'scanning' && state.viewerId === viewerId) {
+      setState({ ...state, currentTab: 'past_unfollowers', page: 1, selectedResults: [], searchTerm: '' });
+      return;
+    }
+    const cached = loadCachedScanResults();
+    setState({
+      status: 'scanning', viewerId, currentTab: 'past_unfollowers', isScanningActive: false,
+      page: 1, searchTerm: '', percentage: 100, results: cached?.results ?? [], scanIncomplete: !cached?.complete,
+      whitelistedResults: loadWhitelist(), selectedResults: [],
+      filter: { showPrivate: true, showVerified: true, showWithOutProfilePicture: true },
+    });
+  }
+
+  function changeTab(next: ScanningTab) {
+    if (state.status !== 'scanning' || next === state.currentTab) {
+      return;
+    }
+    if (next === 'past_unfollowers' && (!pair || pair.baseline.ownerId !== currentViewer())) {
+      openSnapshots();
+      return;
+    }
+    setState({ ...state, currentTab: next, selectedResults: [], page: 1, searchTerm: '' });
+  }
+
+  function startQueue() {
+    if (state.status !== 'scanning' || state.isScanningActive || state.currentTab === 'whitelisted' || !checkViewOwner()) {
+      return;
+    }
+    if (isLocalPreview) {
+      setToast({ show: true, text: t(lang, 'previewReadOnly') });
+      return;
+    }
+    const viewerId = currentViewer();
+    const fromDiff = state.currentTab === 'past_unfollowers';
+    if (!viewerId || viewerId !== state.viewerId || (fromDiff ? pair?.baseline.ownerId !== viewerId : state.scanIncomplete)) {
+      setToast({ show: true, text: t(lang, 'queueChanged') });
+      return;
+    }
+    const selected = new Set(state.selectedResults.map(user => user.id));
+    const candidates = displayed.filter(user => selected.has(user.id) && /^[1-9][0-9]*$/.test(user.id));
+    if (candidates.length === 0 || candidates.length !== selected.size) {
+      return;
+    }
+    if (!confirm(t(lang, 'unfollowConfirm'))) {
+      return;
+    }
+    setState({
+      status: 'unfollowing', viewerId, fromDiff, searchTerm: '', percentage: 0,
+      selectedResults: candidates, unfollowLog: [], filter: { showSucceeded: true, showFailed: true },
+    });
+  }
+
   const onLoadCached = () => {
+    setCapture(null);
     // Re-read instead of trusting the mount-time snapshot: the account may have
     // been switched in another tab, and the cache is scoped per account.
     const cached = loadCachedScanResults();
@@ -197,6 +315,8 @@ function App() {
       percentage: 100,
       isScanningActive: false,
       results: cached.results,
+      viewerId: currentViewer() ?? undefined,
+      scanIncomplete: !cached.complete,
       selectedResults: [],
       whitelistedResults,
       filter: {
@@ -215,8 +335,12 @@ function App() {
     if (state.status !== "initial") {
       return;
     }
+    setCapture(null);
+    scanningPausedRef.current = false;
+    setScanningPaused(false);
     if (isLocalPreview) {
       const previewUsers = _getPreviewUsers();
+      setCapture({ ownerId: '1', capturedAt: Date.now(), followers: previewUsers.filter(u => u.follows_viewer), following: [...previewUsers] });
       setState({
         status: "scanning",
         page: 1,
@@ -224,7 +348,7 @@ function App() {
         currentTab: "non_whitelisted",
         percentage: 100,
         isScanningActive: false,
-        results: previewUsers,
+        results: previewUsers, viewerId: '1',
         selectedResults: previewUsers.slice(0, 3),
         whitelistedResults: previewUsers.slice(10, 12),
         filter: {
@@ -251,6 +375,7 @@ function App() {
       currentTab: "non_whitelisted",
       percentage: 0,
       isScanningActive: true,
+      viewerId: currentViewer() ?? undefined,
       results: [],
       selectedResults: [],
       whitelistedResults,
@@ -321,13 +446,6 @@ function App() {
     if (state.status !== "scanning") {
       return;
     }
-    const displayed = getUsersForDisplay(
-      state.results,
-      state.whitelistedResults,
-      state.currentTab,
-      state.searchTerm,
-      state.filter,
-    );
     if (e.currentTarget.checked) {
       const currentIds = new Set(state.selectedResults.map(u => u.id));
       const toAdd = displayed.filter(u => !currentIds.has(u.id));
@@ -349,16 +467,7 @@ function App() {
     if (state.status !== "scanning") {
       return;
     }
-    const pageUsers = getCurrentPageUnfollowers(
-      getUsersForDisplay(
-        state.results,
-        state.whitelistedResults,
-        state.currentTab,
-        state.searchTerm,
-        state.filter,
-      ),
-      state.page,
-    );
+    const pageUsers = getCurrentPageUnfollowers(displayed, state.page);
     if (e.currentTarget.checked) {
       const currentIds = new Set(state.selectedResults.map(u => u.id));
       const toAdd = pageUsers.filter(u => !currentIds.has(u.id));
@@ -375,15 +484,37 @@ function App() {
     }
   };
 
-  const onWhitelistUpdate = (updatedWhitelist: readonly UserNode[]) => {
-    saveWhitelist(updatedWhitelist);
+  const onWhitelistUpdate = (updatedWhitelist: readonly UserNode[]): boolean => {
+    if (!checkViewOwner()) {
+      return false;
+    }
+    try {
+      saveWhitelist(updatedWhitelist);
+    } catch {
+      setToast({ show: true, text: t(lang, 'whitelistSaveFailed') });
+      setState(prev => prev.status === 'scanning' ? { ...prev, selectedResults: [] } : prev);
+      return false;
+    }
     if (state.status === "scanning") {
       setState({
         ...state,
-        whitelistedResults: updatedWhitelist,
+        whitelistedResults: updatedWhitelist, selectedResults: [], page: 1,
       });
     }
+    return true;
   };
+
+  useEffect(() => {
+    const syncWhitelist = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== WHITELISTED_RESULTS_STORAGE_KEY) {
+        return;
+      }
+      const whitelistedResults = loadWhitelist();
+      setState(prev => prev.status === 'scanning' ? { ...prev, whitelistedResults, selectedResults: [], page: 1 } : prev);
+    };
+    window.addEventListener('storage', syncWhitelist);
+    return () => window.removeEventListener('storage', syncWhitelist);
+  }, []);
 
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -412,30 +543,28 @@ function App() {
   }, [isActiveProcess, state]);
 
   useEffect(() => {
-    if (state.status !== "scanning" || isLocalPreview || state.percentage === 100) {
+    if (state.status !== 'scanning' || isLocalPreview || !state.isScanningActive) {
       return;
     }
 
-    const viewerId = getCookie("ds_user_id");
-    if (viewerId === null) {
+    const viewerId = state.viewerId;
+    if (!viewerId || viewerId !== currentViewer()) {
       setState(prevState =>
-        prevState.status === "scanning" ? { ...prevState, isScanningActive: false } : prevState,
+        prevState.status === 'scanning' ? { ...prevState, isScanningActive: false, scanIncomplete: true } : prevState,
       );
       setToast({ show: true, text: t(lang, "scanFailedFollowing") });
       return;
     }
 
+    let cancelled = false;
     const scanAccountChanged = new Error("Instagram account changed during scan");
     const checkScanAccount = () => {
-      if (getCookie("ds_user_id") !== viewerId) {
+      if (cancelled || getCookie('ds_user_id') !== viewerId) {
         throw scanAccountChanged;
       }
     };
 
-    // Fetches one page, retrying with backoff on rate limits / network errors.
-    // `blocked` is true when retries were exhausted for such a transient error
-    // (the scan should stop); false means a different, non-retryable error
-    // (e.g. 404 / unavailable account), which callers may choose to skip.
+    // Retry transient network failures. An explicit account block ends the run.
     type PageResult =
       | { readonly ok: true; readonly page: FriendshipsPage }
       | { readonly ok: false; readonly blocked: boolean };
@@ -450,16 +579,21 @@ function App() {
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       while (true) {
         checkScanAccount();
+        if (getBlockedUntil() > Date.now()) {
+          return { ok: false, blocked: true };
+        }
         try {
           return { ok: true, page: await fetchFriendshipsPage(kind, maxId, count, viewerId) };
         } catch (e: any) {
           checkScanAccount();
-          const status = e?.status;
+          if (isHardBlock(e)) {
+            setBlockedUntil(Date.now() + BLOCKED_COOLDOWN_MS);
+            return { ok: false, blocked: true };
+          }
           const message = String(e?.message ?? "");
           const isRateLimitOrSoftBlock =
             (e instanceof InstagramApiError || e?.name === "InstagramApiError") &&
-            (status === 429 ||
-              e?.notJson === true ||
+            (e?.notJson === true ||
               /feedback_required|checkpoint|rate limit|please wait/i.test(message));
           const isNetworkError = e instanceof TypeError || /fetch|network/i.test(message);
           const isTransient = isRateLimitOrSoftBlock || isNetworkError;
@@ -529,6 +663,7 @@ function App() {
     ): Promise<boolean> => {
       let maxId: string | undefined;
       let pagesFetched = 0;
+      const cursors = new Set<string>();
 
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       while (true) {
@@ -539,7 +674,11 @@ function App() {
           return false;
         }
         const page = result.page;
-        const pageUsers = page.users ?? [];
+        const pageUsers = page.users;
+        if (!Array.isArray(pageUsers) || (page.has_more === true && !page.next_max_id) ||
+          (page.has_more === false && Boolean(page.next_max_id)) || (page.next_max_id && !pageUsers.length)) {
+          return false;
+        }
 
         if (!(await onPageUsers(pageUsers))) {
           return false;
@@ -555,26 +694,27 @@ function App() {
           console.error(`Stopping ${kind} scan early: hit the safety cap of ${pageSafetyLimit} pages.`);
           return false;
         }
-        if (page.next_max_id === maxId) {
+        if (cursors.has(page.next_max_id!)) {
           // Instagram handed back the cursor we just sent: the walk would loop forever.
           console.error(`Stopping ${kind} scan early: Instagram returned the same page cursor twice.`);
           return false;
         }
         maxId = page.next_max_id;
+        cursors.add(maxId!);
 
         await paceRequest();
       }
     };
 
     const scan = async () => {
-      // Phase 1: Retrieve and index all of the viewer's followers.
-      // We dual-index by ID and normalized lowercase username to guarantee zero false positives.
-      const followerIndex = createFollowerIndex();
+      const followers = new Map<string, SnapshotUser>();
+      const following = new Map<string, SnapshotUser>();
       let followersCount = 0;
 
       const indexFollowersPage = async (pageUsers: readonly RawFriendshipUser[]): Promise<boolean> => {
         for (const user of pageUsers) {
-          addFollowerToIndex(followerIndex, user);
+          const record = snapshotUser(user);
+          followers.set(record.id, record);
           followersCount++;
         }
 
@@ -637,9 +777,11 @@ function App() {
         const nonFollowersBatch: UserNode[] = [];
 
         for (const user of pageUsers) {
-          const followsViewer = isUserInFollowerIndex(followerIndex, user);
+          const record = snapshotUser(user);
+          following.set(record.id, record);
+          const followsViewer = followers.has(record.id);
           if (!followsViewer) {
-            nonFollowersBatch.push(rawFriendshipUserToUserNode(user, false));
+            nonFollowersBatch.push(toResult(record));
           }
           checkedCount++;
         }
@@ -667,6 +809,7 @@ function App() {
         return true;
       };
 
+      await paceRequest();
       const followingCompleted = await fetchList(
         "following",
         FOLLOWING_PAGE_SAFETY_LIMIT,
@@ -676,7 +819,7 @@ function App() {
 
       if (!followingCompleted && checkedCount === 0) {
         setState(prevState =>
-          prevState.status === "scanning" ? { ...prevState, isScanningActive: false } : prevState,
+          prevState.status === 'scanning' ? { ...prevState, isScanningActive: false, scanIncomplete: true } : prevState,
         );
         setToast({
           show: true,
@@ -687,9 +830,12 @@ function App() {
 
       const scanIsComplete = followingCompleted;
 
+      if (scanIsComplete) {
+        setCapture({ ownerId: viewerId, capturedAt: Date.now(), followers: Array.from(followers.values()), following: Array.from(following.values()) });
+      }
       if (scanIsComplete || nonFollowers.length > 0) {
-        saveCachedScanResults(nonFollowers, viewerId);
-        setCachedScan({ results: nonFollowers, timestamp: Date.now() });
+        saveCachedScanResults(nonFollowers, viewerId, scanIsComplete);
+        setCachedScan(loadCachedScanResults());
       }
 
       setState(prevState => {
@@ -714,20 +860,31 @@ function App() {
       });
     };
     scan().catch(error => {
-      if (error !== scanAccountChanged) {
-        throw error;
+      if (cancelled) {
+        return;
       }
+      setCapture(null);
+      if (error !== scanAccountChanged) {
+        setState(prev => prev.status === 'scanning' ? { ...prev, isScanningActive: false, scanIncomplete: true, selectedResults: [] } : prev);
+        setToast({ show: true, text: t(lang, 'partialScanWarning') });
+        return;
+      }
+      setPair(null);
       scanningPausedRef.current = false;
       setScanningPaused(false);
       setCachedScan(loadCachedScanResults());
       setState({ status: "initial" });
       setToast({ show: true, text: t(lang, "scanAccountChanged") });
     });
-    // Dependency array not entirely legit, but works this way. TODO: Find a way to fix.
+    return () => {
+      cancelled = true;
+    };
+    // A scan begins once on entry. Progress and filter changes do not restart it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status]);
 
   useEffect(() => {
+    let cancelled = false;
     const unfollow = async () => {
       if (state.status !== "unfollowing" || isLocalPreview) {
         return;
@@ -743,19 +900,56 @@ function App() {
         return;
       }
 
+      const stopQueue = (reason: string) => {
+        setState(prev => prev.status === 'unfollowing' ? { ...prev, aborted: true, stopReason: reason } : prev);
+      };
       const csrftoken = getCookie("csrftoken");
       if (csrftoken === null) {
-        throw new Error("csrftoken cookie is null");
+        stopQueue(t(lang, 'queueSession'));
+        return;
       }
 
       let counter = 0;
       for (const user of state.selectedResults) {
+        const eligible = () => {
+          if (cancelled || state.viewerId !== currentViewer() || getBlockedUntil() > Date.now()) {
+            return false;
+          }
+          try {
+            const protectedUser = createWhitelistMatcher(loadWhitelistForAction());
+            if (protectedUser(user)) {
+              return false;
+            }
+            if (!state.fromDiff) {
+              return true;
+            }
+            const id = user.id;
+            if (!pair || pair.baseline.ownerId !== state.viewerId) {
+              return false;
+            }
+            const wasFollower = pair.baseline.followers[id];
+            const stillFollowing = pair.comparison.following[id];
+            const aliases = [wasFollower, pair.baseline.following[id], stillFollowing];
+            return !!(wasFollower && stillFollowing && !pair.comparison.followers[id]) &&
+              !aliases.some(alias => alias && protectedUser(alias));
+          } catch {
+            return false;
+          }
+        };
+        if (cancelled) {
+          return;
+        }
+        if (!eligible()) {
+          stopQueue(t(lang, 'queueChanged'));
+          break;
+        }
         counter += 1;
-        // Fix: Changed from Math.floor to Math.round to ensure progress reaches 100%
-        // Math.floor would leave progress at 99% when near completion
-        const percentage = Math.round((counter / state.selectedResults.length) * 100);
+        const percentage = Math.floor((counter / state.selectedResults.length) * 100);
         try {
-          const result = await unfollowUser(user, csrftoken);
+          const result = await unfollowUser(user, csrftoken, eligible);
+          if (cancelled) {
+            return;
+          }
           const success = result.outcome === "unfollowed";
           const isActionBlocked = result.outcome === "blocked";
           if (!success) {
@@ -788,6 +982,11 @@ function App() {
             break;
           }
         } catch (e) {
+          if (isHardBlock(e)) {
+            setBlockedUntil(Date.now() + BLOCKED_COOLDOWN_MS);
+            stopQueue(t(lang, 'actionBlockedWarning'));
+            break;
+          }
           console.error(e);
           setState(prevState => {
             if (prevState.status !== "unfollowing") {
@@ -822,8 +1021,11 @@ function App() {
         setToast({ show: false });
       }
     };
-    unfollow();
-    // Dependency array not entirely legit, but works this way. TODO: Find a way to fix.
+    void unfollow();
+    return () => {
+      cancelled = true;
+    };
+    // A queue owns its initially confirmed selection until it finishes or is cancelled.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status]);
 
@@ -835,6 +1037,8 @@ function App() {
 
     case "scanning": {
       markup = <Searching
+        displayed={displayed} changeTab={changeTab} changeWhitelist={onWhitelistUpdate} startQueue={startQueue}
+        pairDescription={pair ? `${pair.baseline.label} → ${pair.comparison.label}` : ''}
         state={state}
         handleScanFilter={handleScanFilter}
         toggleUser={toggleUser}
@@ -860,12 +1064,13 @@ function App() {
       assertUnreachable(state);
   }
 
-  const showScanWarning = state.status === "scanning" && state.results.length === 0;
+  const showScanWarning = state.status === 'scanning' && state.isScanningActive && state.results.length === 0;
 
   return (
     <main id="main" role="main" className={`iu ${showScanWarning ? "has-scan-warning" : ""}`}>
       <section className="overlay">
         <Toolbar
+          displayed={displayed} openSnapshots={openSnapshots} checkViewOwner={checkViewOwner}
           state={state}
           setState={setState}
           isActiveProcess={isActiveProcess}
@@ -880,6 +1085,10 @@ function App() {
         ></Toolbar>
 
         {markup}
+        {historyOwner && <SnapshotManager ownerId={historyOwner} currentOwner={currentViewer}
+          capture={capture?.ownerId === historyOwner ? capture : null}
+          pair={pair?.baseline.ownerId === historyOwner ? pair : null} lang={lang}
+          onCompare={viewDiff} onClose={() => setHistoryOwner(null)} />}
 
         {toast.show && <Toast show={toast.show} message={toast.text} onClose={() => setToast({ show: false })} />}
       </section>

@@ -47,14 +47,7 @@ export const importWhitelist = (
         return;
       }
       
-      // Basic validation of user structure
-      const isValid = importedUsers.every(user => 
-        user.id && 
-        user.username && 
-        typeof user.id === "string" && 
-        typeof user.username === "string"
-      );
-      
+      const isValid = importedUsers.every(validWhitelistEntry);
       if (!isValid) {
         onError("Invalid file format: Users missing required fields (id, username)");
         return;
@@ -73,28 +66,31 @@ export const importWhitelist = (
   reader.readAsText(file);
 };
 
-/**
- * Clear all whitelist data
- */
-export const clearWhitelist = (): void => {
-  if (!confirm("Are you sure you want to clear the entire whitelist? This action cannot be undone.")) {
-    return;
+function validWhitelistEntry(user: any): boolean {
+  if (!user || typeof user.id !== 'string' || typeof user.username !== 'string' ||
+    !/^[a-z0-9._]{1,30}$/i.test(user.username) || user.username === '.' || user.username === '..') {
+    return false;
   }
-  
-  localStorage.removeItem(WHITELISTED_RESULTS_STORAGE_KEY);
-};
+  const pending = `pasted_${user.username.toLowerCase()}`;
+  return /^[1-9]\d*$/.test(user.id) || user.id === pending || user.id.startsWith(pending + '_');
+}
 
-/**
- * Load whitelist from localStorage
- */
+// A write action must stop if its protection list cannot be read or trusted.
+export function loadWhitelistForAction(): readonly UserNode[] {
+  const raw = localStorage.getItem(WHITELISTED_RESULTS_STORAGE_KEY);
+  if (raw === null) {
+    return [];
+  }
+  const entries = JSON.parse(raw);
+  if (!Array.isArray(entries) || !entries.every(validWhitelistEntry)) {
+    throw new Error('Invalid stored whitelist.');
+  }
+  return entries;
+}
+
 export const loadWhitelist = (): readonly UserNode[] => {
   try {
-    const whitelistedResultsFromStorage = localStorage.getItem(WHITELISTED_RESULTS_STORAGE_KEY);
-    if (!whitelistedResultsFromStorage) {
-      return [];
-    }
-    const parsed = JSON.parse(whitelistedResultsFromStorage);
-    return Array.isArray(parsed) ? parsed : [];
+    return loadWhitelistForAction();
   } catch {
     return [];
   }
@@ -103,13 +99,12 @@ export const loadWhitelist = (): readonly UserNode[] => {
 /**
  * Save whitelist to localStorage
  */
-export const saveWhitelist = (whitelistedUsers: readonly UserNode[]): void => {
-  try {
-    localStorage.setItem(WHITELISTED_RESULTS_STORAGE_KEY, JSON.stringify(whitelistedUsers));
-  } catch (e) {
-    console.warn("Could not save whitelist to storage:", e);
+export function saveWhitelist(whitelistedUsers: readonly UserNode[]): void {
+  if (!Array.isArray(whitelistedUsers) || !whitelistedUsers.every(validWhitelistEntry)) {
+    throw new Error('Invalid whitelist entries.');
   }
-};
+  localStorage.setItem(WHITELISTED_RESULTS_STORAGE_KEY, JSON.stringify(whitelistedUsers));
+}
 
 /**
  * Merge imported whitelist with existing whitelist (avoiding duplicates)
@@ -135,13 +130,11 @@ const isTimings = (value: unknown): value is Timings => {
  * Load timings from localStorage
  */
 export const loadTimings = (): Timings | null => {
-  const timingsFromStorage = localStorage.getItem(TIMINGS_STORAGE_KEY);
-
-  if (timingsFromStorage === null) {
-    return null;
-  }
-
   try {
+    const timingsFromStorage = localStorage.getItem(TIMINGS_STORAGE_KEY);
+    if (timingsFromStorage === null) {
+      return null;
+    }
     const parsedTimings: unknown = JSON.parse(timingsFromStorage);
     return isTimings(parsedTimings) ? parsedTimings : null;
   } catch {
@@ -165,61 +158,68 @@ export const saveTimings = (timings: Timings): void => {
  * Scoped to the logged-in account: one shared key would show the previous
  * account's results after switching accounts.
  */
-const cacheKeySuffix = (accountId?: string | null): string => `-${accountId ?? getCookie("ds_user_id") ?? ""}`;
+export interface CachedScan {
+  readonly results: readonly UserNode[];
+  readonly timestamp: number;
+  readonly complete: boolean;
+}
 
-/**
- * `accountId` is the viewer captured when the scan started. Passing it keeps a
- * scan that outlives an account switch under the account it came from, instead
- * of overwriting the new account's cache.
- */
-export const saveCachedScanResults = (results: readonly UserNode[], accountId?: string | null): void => {
+// A single write ties completion, viewer, timestamp and rows to the same scan.
+export function saveCachedScanResults(results: readonly UserNode[], accountId: string, complete: boolean): void {
+  if (!/^[1-9]\d*$/.test(accountId)) {
+    return;
+  }
   try {
-    const suffix = cacheKeySuffix(accountId);
-    localStorage.setItem(LAST_SCAN_RESULTS_STORAGE_KEY + suffix, JSON.stringify(results));
-    localStorage.setItem(LAST_SCAN_TIMESTAMP_STORAGE_KEY + suffix, String(Date.now()));
+    const entry = { version: 2, accountId, complete, results, timestamp: Date.now() };
+    localStorage.setItem(`${LAST_SCAN_RESULTS_STORAGE_KEY}-${accountId}`, JSON.stringify(entry));
   } catch (e) {
     console.warn("Could not cache scan results:", e);
   }
-};
+}
 
-/**
- * Load cached scan results from localStorage
- */
-export const loadCachedScanResults = (): { results: readonly UserNode[]; timestamp: number } | null => {
+export function loadCachedScanResults(): CachedScan | null {
   try {
-    const suffix = cacheKeySuffix();
-    const raw = localStorage.getItem(LAST_SCAN_RESULTS_STORAGE_KEY + suffix);
-    const time = localStorage.getItem(LAST_SCAN_TIMESTAMP_STORAGE_KEY + suffix);
-    if (!raw || !time) {
+    const accountId = getCookie('ds_user_id');
+    if (!accountId || !/^[1-9]\d*$/.test(accountId)) {
+      return null;
+    }
+    const raw = localStorage.getItem(`${LAST_SCAN_RESULTS_STORAGE_KEY}-${accountId}`);
+    if (raw === null) {
       return null;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
+    const legacy = Array.isArray(parsed);
+    if (!legacy && (parsed?.version !== 2 || parsed.accountId !== accountId)) {
       return null;
     }
-    return {
-      results: deduplicateUsersById(parsed as readonly UserNode[]),
-      timestamp: Number(time),
-    };
+    const rows = legacy ? parsed : parsed.results;
+    const timestamp = legacy ? Number(localStorage.getItem(`${LAST_SCAN_TIMESTAMP_STORAGE_KEY}-${accountId}`)) : parsed.timestamp;
+    if (!Number.isSafeInteger(timestamp) || timestamp <= 0 || !Array.isArray(rows) ||
+      !rows.every(user => validWhitelistEntry(user) && /^[1-9]\d*$/.test(user.id))) {
+      return null;
+    }
+    return { results: deduplicateUsersById(rows), timestamp, complete: !legacy && parsed.complete === true };
   } catch {
     return null;
   }
-};
+}
 
 /**
  * Timestamp (ms) until which scans and unfollows must not start.
  */
+let inMemoryBlockedUntil = 0;
 export const getBlockedUntil = (): number => {
   try {
-    return Number(localStorage.getItem(BLOCKED_UNTIL_STORAGE_KEY) ?? 0);
+    return Math.max(Number(localStorage.getItem(BLOCKED_UNTIL_STORAGE_KEY)) || 0, inMemoryBlockedUntil);
   } catch {
-    return 0;
+    return inMemoryBlockedUntil;
   }
 };
 
 export const setBlockedUntil = (until: number): void => {
+  inMemoryBlockedUntil = Math.max(getBlockedUntil(), until);
   try {
-    localStorage.setItem(BLOCKED_UNTIL_STORAGE_KEY, String(until));
+    localStorage.setItem(BLOCKED_UNTIL_STORAGE_KEY, String(inMemoryBlockedUntil));
   } catch (e) {
     console.warn("Could not persist the cooldown:", e);
   }

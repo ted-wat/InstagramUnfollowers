@@ -6,6 +6,7 @@ import { UnfollowFilter } from "./unfollow-filter";
 
 type ScanningState = {
   readonly status: 'scanning';
+  readonly viewerId?: string;
   readonly page: number;
   readonly currentTab: ScanningTab;
   readonly searchTerm: string;
@@ -21,6 +22,9 @@ type ScanningState = {
 
 type UnfollowingState = {
   readonly status: 'unfollowing';
+  readonly viewerId: string;
+  readonly fromDiff: boolean;
+  readonly stopReason?: string;
   readonly searchTerm: string;
   readonly percentage: number;
   readonly selectedResults: readonly UserNode[];

@@ -85,6 +85,26 @@ export function isWithoutProfilePicture(user: UserNode): boolean {
   return WITHOUT_PROFILE_PICTURE_URL_IDS.some(id => user.profile_pic_url.includes(id));
 }
 
+type WhitelistIdentity = Pick<UserNode, 'id' | 'username'>;
+
+/** A pasted handle can only veto an action. It cannot establish historical identity. */
+export function createWhitelistMatcher(entries: readonly WhitelistIdentity[]): (user: WhitelistIdentity) => boolean {
+  const ids = new Set<string>();
+  const pendingHandles = new Set<string>();
+  for (const entry of entries) {
+    if (/^[1-9]\d*$/.test(entry.id)) {
+      ids.add(entry.id);
+    } else if (entry.id.startsWith('pasted_')) {
+      pendingHandles.add(entry.username.toLowerCase());
+    }
+  }
+  return user => ids.has(user.id) || pendingHandles.has(user.username.toLowerCase());
+}
+
+export function isWhitelisted(user: WhitelistIdentity, entries: readonly WhitelistIdentity[]): boolean {
+  return createWhitelistMatcher(entries)(user);
+}
+
 export function getUsersForDisplay(
   results: readonly UserNode[],
   whitelistedResults: readonly UserNode[],
@@ -93,17 +113,18 @@ export function getUsersForDisplay(
   filter: ScanningFilter,
 ): readonly UserNode[] {
   const users: UserNode[] = [];
-  const whitelistedIds = new Set(whitelistedResults.map(user => user.id));
+  const matchesWhitelist = createWhitelistMatcher(whitelistedResults);
   for (const result of results) {
-    const isWhitelisted = whitelistedIds.has(result.id);
+    const protectedUser = matchesWhitelist(result);
     switch (currentTab) {
       case "non_whitelisted":
-        if (isWhitelisted) {
+      case 'past_unfollowers':
+        if (protectedUser) {
           continue;
         }
         break;
       case "whitelisted":
-        if (!isWhitelisted) {
+        if (!protectedUser) {
           continue;
         }
         break;
@@ -230,6 +251,47 @@ export function instagramApiHeaders(extra: Record<string, string> = {}): Record<
   return headers;
 }
 
+// Restrict the overlay to its current origin even if an endpoint redirects.
+function instagramFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...options, credentials: 'same-origin', mode: 'same-origin', redirect: 'error' });
+}
+
+const blockMessage = /feedback_required|checkpoint|action_blocked|try again later|rate limit|please wait/i;
+
+class InstagramBlockError extends Error {
+  constructor() {
+    super('Instagram blocked this request. The operation has stopped.');
+    this.name = 'InstagramBlockError';
+  }
+}
+
+export function isHardBlock(error: unknown): boolean {
+  return error instanceof InstagramBlockError ||
+    (error instanceof InstagramApiError && (error.status === 429 || blockMessage.test(error.message)));
+}
+
+/** Check all response paths, including the page fallback and verification reads. */
+async function readInstagramResponse(response: Response): Promise<{ text: string; data: any }> {
+  if (response.status === 429) {
+    throw new InstagramBlockError();
+  }
+  const text = await response.text();
+  let data: any = null;
+  try {
+    data = JSON.parse(text.replace(/^for \(;;\);/, ''));
+  } catch {
+    // The HTML page fallback is intentionally not JSON.
+  }
+  const errorFields = data && [data.message, data.error, data.errors, data.error_type, data.errorSummary];
+  const blocked = data === null
+    ? /feedback_required|action_blocked/i.test(text) || (!response.ok && blockMessage.test(text))
+    : blockMessage.test(JSON.stringify(errorFields));
+  if (data?.spam === true || data?.checkpoint_url || blocked) {
+    throw new InstagramBlockError();
+  }
+  return { text, data };
+}
+
 export type UnfollowOutcome = 'unfollowed' | 'failed' | 'blocked';
 
 export interface UnfollowResult {
@@ -244,6 +306,7 @@ interface WebSessionTokens {
 }
 
 let cachedWebSessionTokens: WebSessionTokens | null = null;
+let cachedTokensOwner: string | null = null;
 
 function tokensFromHtml(html: string): WebSessionTokens | null {
   const fbDtsg = /"DTSGInitialData",\[\],\{"token":"([^"]+)"/.exec(html)?.[1] ?? /"dtsg":\{"token":"([^"]+)"/.exec(html)?.[1];
@@ -257,7 +320,11 @@ function tokensFromHtml(html: string): WebSessionTokens | null {
 // fb_dtsg and lsd are the per-session tokens instagram.com's GraphQL writes
 // carry. They come from the page's module registry when it is still loaded,
 // otherwise from the inline page data, otherwise from a fresh copy of the page.
-async function getWebSessionTokens(): Promise<WebSessionTokens | null> {
+async function getWebSessionTokens(ownerId: string): Promise<WebSessionTokens | null> {
+  if (cachedTokensOwner !== ownerId) {
+    cachedWebSessionTokens = null;
+    cachedTokensOwner = ownerId;
+  }
   if (cachedWebSessionTokens !== null) {
     return cachedWebSessionTokens;
   }
@@ -277,9 +344,18 @@ async function getWebSessionTokens(): Promise<WebSessionTokens | null> {
   cachedWebSessionTokens = tokensFromHtml(document.documentElement.innerHTML);
   if (cachedWebSessionTokens === null) {
     try {
-      const res = await fetch('https://www.instagram.com/', { credentials: 'same-origin' });
-      cachedWebSessionTokens = tokensFromHtml(await res.text());
+      const res = await instagramFetch('https://www.instagram.com/');
+      const { text } = await readInstagramResponse(res);
+      if (cachedTokensOwner !== ownerId || getCookie('ds_user_id') !== ownerId) {
+        return null;
+      }
+      if (res.ok) {
+        cachedWebSessionTokens = tokensFromHtml(text);
+      }
     } catch (e) {
+      if (isHardBlock(e)) {
+        throw e;
+      }
       console.warn('Could not load Instagram session tokens:', e);
     }
   }
@@ -312,7 +388,7 @@ function findFriendshipStatus(node: any): any {
 }
 
 // Searches the viewer's own following list for one account, the same way the
-// followers search in probe/issue.md works. Returns null if the lookup failed.
+// followers search works. A missing handle cannot confirm absence by immutable ID.
 export async function isStillFollowing(user: { readonly id: string; readonly username: string }): Promise<boolean | null> {
   const viewerId = getCookie('ds_user_id');
   if (viewerId === null) {
@@ -321,12 +397,12 @@ export async function isStillFollowing(user: { readonly id: string; readonly use
   const url = `https://www.instagram.com/api/v1/friendships/${viewerId}/following/?count=12&query=${encodeURIComponent(user.username)}&search_surface=follow_list_page`;
   try {
     const page = await fetchFriendshipsPageFromUrl(url);
-    const target = user.username.toLowerCase();
-    return (page.users ?? []).some(u => {
-      const { ids, username } = extractUserIdentities(u);
-      return ids.includes(user.id) || username === target;
-    });
+    const foundById = page.users?.some(entry => numericUserId(entry) === user.id);
+    return foundById ? true : null;
   } catch (e) {
+    if (isHardBlock(e)) {
+      throw e;
+    }
     console.warn(`Could not verify unfollow of ${user.username}:`, e);
     return null;
   }
@@ -335,11 +411,28 @@ export async function isStillFollowing(user: { readonly id: string; readonly use
 // Unfollows the way instagram.com's own Unfollow button does (Oct 2026):
 // POST /api/v1/friendships/destroy/<id>/ with the same headers and form body
 // the web client sends. It only counts once Instagram confirms the follow is
-// gone: the response's friendship_status says so, or a follow-up search of
-// the viewer's following list no longer finds the account. A 2xx alone proves
-// nothing (Instagram answers unknown routes with a 200 HTML page).
-export async function unfollowUser(user: { readonly id: string; readonly username: string }, csrftoken: string): Promise<UnfollowResult> {
-  const tokens = await getWebSessionTokens();
+// gone in an explicit friendship status. A by-handle lookup can confirm a
+// continuing relationship by ID, but cannot prove the absence of a renamed user.
+export async function unfollowUser(user: WhitelistIdentity, csrftoken: string, canContinue?: () => boolean): Promise<UnfollowResult> {
+  try {
+    return await attemptUnfollow(user, csrftoken, canContinue);
+  } catch (error) {
+    if (isHardBlock(error)) {
+      return { outcome: 'blocked', detail: 'Instagram blocked this operation.' };
+    }
+    throw error;
+  }
+}
+
+async function attemptUnfollow(user: WhitelistIdentity, csrftoken: string, canContinue?: () => boolean): Promise<UnfollowResult> {
+  if (!/^[1-9]\d*$/.test(user.id)) {
+    return { outcome: 'failed', detail: 'Account ID is invalid.' };
+  }
+  const ownerId = getCookie('ds_user_id');
+  if (!ownerId) {
+    return { outcome: 'failed', detail: 'The active account is unavailable.' };
+  }
+  const tokens = await getWebSessionTokens(ownerId);
   if (tokens === null) {
     return { outcome: 'failed', detail: 'could not find the fb_dtsg/lsd session tokens on the page' };
   }
@@ -358,29 +451,16 @@ export async function unfollowUser(user: { readonly id: string; readonly usernam
     extra['X-Instagram-AJAX'] = tokens.revision;
   }
 
-  const res = await fetch(`https://www.instagram.com/api/v1/friendships/destroy/${user.id}/`, {
+  if (getCookie('ds_user_id') !== ownerId || (canContinue && !canContinue())) {
+    return { outcome: 'failed', detail: 'Account or selection changed.' };
+  }
+  const res = await instagramFetch(`https://www.instagram.com/api/v1/friendships/destroy/${user.id}/`, {
     headers: instagramApiHeaders(extra),
     method: 'POST',
-    credentials: 'same-origin',
     body: body.toString(),
   });
   rememberWwwClaim(res);
-  const text = await res.text().catch(() => '');
-  let data: any = null;
-  try {
-    data = JSON.parse(text.replace(/^for \(;;\);/, ''));
-  } catch {
-    // Not JSON; reported below with enough context to see what came back.
-  }
-
-  const errorText = JSON.stringify(data?.errors ?? data?.error ?? '') + ` ${data?.message ?? ''} ${data?.errorSummary ?? ''}`;
-  const isActionBlocked =
-    res.status === 429 ||
-    data?.spam === true ||
-    /feedback_required|checkpoint|action_blocked|try again later|rate limit/i.test(errorText);
-  if (isActionBlocked) {
-    return { outcome: 'blocked', detail: `HTTP ${res.status}: ${errorText.trim()}` };
-  }
+  const { text, data } = await readInstagramResponse(res);
   if (!res.ok || data === null || data.errors || data.error || data.status !== 'ok') {
     const body = data === null
       ? `not JSON (content-type ${res.headers.get('content-type')}, redirected ${res.redirected}, final URL ${res.url}): ${text.slice(0, 300)}`
@@ -396,14 +476,14 @@ export async function unfollowUser(user: { readonly id: string; readonly usernam
     return { outcome: 'unfollowed', detail: 'confirmed' };
   }
 
+  if (getCookie('ds_user_id') !== ownerId) {
+    return { outcome: 'failed', detail: 'Account changed during verification.' };
+  }
   const stillFollowing = await isStillFollowing(user);
   if (stillFollowing === true) {
     return { outcome: 'failed', detail: `Instagram answered but the account is still in your following list. Response: ${JSON.stringify(data).slice(0, 500)}` };
   }
-  if (stillFollowing === null) {
-    return { outcome: 'failed', detail: `Instagram answered but the unfollow could not be confirmed. Response: ${JSON.stringify(data).slice(0, 500)}` };
-  }
-  return { outcome: 'unfollowed', detail: 'confirmed' };
+  return { outcome: 'failed', detail: 'Instagram did not confirm the unfollow by account ID.' };
 }
 
 export type FriendshipsListKind = 'following' | 'followers';
@@ -420,7 +500,8 @@ export type FriendshipsListKind = 'following' | 'followers';
  * error, so the old code had no way to detect the failure.
  */
 export interface RawFriendshipUser {
-  readonly pk: string | number;
+  readonly pk?: string | number;
+  readonly id?: string | number;
   readonly pk_id?: string;
   readonly username: string;
   readonly full_name?: string;
@@ -465,38 +546,56 @@ export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: st
 }
 
 async function fetchFriendshipsPageFromUrl(url: string, headers?: Record<string, string>): Promise<FriendshipsPage> {
-  const response = await fetch(url, {
-    credentials: 'same-origin',
+  const response = await instagramFetch(url, {
     headers: headers ?? instagramApiHeaders(),
   });
   rememberWwwClaim(response);
   const contentType = response.headers.get('content-type') || '';
-  const text = await response.text().catch(() => '');
-  const describe = () =>
-    `Instagram returned HTTP ${response.status} (${contentType || 'no content-type'}, redirected ${response.redirected}, final URL ${response.url}) for ${url}: ${text.slice(0, 200)}`;
+  const { data } = await readInstagramResponse(response);
   if (!response.ok) {
-    throw new InstagramApiError(response.status, describe());
+    throw new InstagramApiError(response.status, `Instagram returned HTTP ${response.status}.`);
   }
-  // Instagram answers throttled or unauthorised API calls with its 200 HTML
-  // page, sometimes even labelled as JSON, so parse defensively.
-  let data: any;
-  try {
-    if (!/json/i.test(contentType)) {
-      throw new Error('not JSON');
-    }
-    data = JSON.parse(text);
-  } catch {
-    throw new InstagramApiError(response.status, describe(), true);
+  if (!/json/i.test(contentType) || data === null) {
+    throw new InstagramApiError(response.status, 'Instagram did not return a JSON list.', true);
   }
-  if (data?.status === 'fail' || (!data?.users && data?.message)) {
-    throw new InstagramApiError(response.status, data?.message || `Instagram returned failure status for ${url}`);
+  if (data.status === 'fail' || data.error || data.errors || !Array.isArray(data.users)) {
+    throw new InstagramApiError(response.status, 'Instagram did not return a valid relationship list.');
+  }
+  if (data.has_more !== undefined && typeof data.has_more !== 'boolean' ||
+    data.next_max_id != null && typeof data.next_max_id !== 'string' ||
+    data.has_more === true && !data.next_max_id ||
+    data.next_max_id && data.has_more !== false && !data.users.length) {
+    throw new InstagramApiError(response.status, 'Instagram returned an incomplete page cursor.');
+  }
+  if (data.users.some((user: RawFriendshipUser) => !user || !validHandle(user.username) || !numericUserId(user))) {
+    throw new InstagramApiError(response.status, 'A relationship record is missing a valid identity.');
   }
   return data as FriendshipsPage;
 }
 
+function validHandle(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9._]{1,30}$/i.test(value) && value !== '.' && value !== '..';
+}
+
+function numericUserId(user: RawFriendshipUser): string | undefined {
+  for (const value of [user.pk_id, user.pk, user.id]) {
+    if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) {
+      return value;
+    }
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+      return String(value);
+    }
+  }
+  return undefined;
+}
+
 export function rawFriendshipUserToUserNode(raw: RawFriendshipUser, followsViewer: boolean): UserNode {
+  const id = numericUserId(raw);
+  if (!id) {
+    throw new Error('Missing numeric account ID.');
+  }
   return {
-    id: String(raw.pk_id ?? raw.pk),
+    id,
     username: raw.username,
     full_name: raw.full_name ?? '',
     profile_pic_url: raw.profile_pic_url,
